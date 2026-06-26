@@ -1,92 +1,128 @@
 #include <windows.h>
 #include <fwpmu.h>
 #include <iostream>
+#include <tlhelp32.h>
 
 #pragma comment(lib, "Fwpuclnt.lib")
 
 HANDLE gEngineHandle = NULL;
-UINT64 gFilterId = 0; // HATA ÇÖZÜMÜ: UINT32 yerine UINT64 yapildi
+UINT64 gFilterIdTCP = 0;
+UINT64 gFilterIdUDP = 0;
 bool gIsLagging = false;
 
-// WFP Filtresini Başlat (Sadece hedef oyunu engeller)
-void StartLag(UINT16 port, FWP_BYTE_BLOB* appId) {
-    if (gIsLagging) return;
-
-    FWPM_FILTER0 filter = { 0 };
-    FWPM_FILTER_CONDITION0 conditions[2] = { 0 }; 
-
-    filter.displayData.name = L"SonOyuncuIsolatedBlinkFilter";
-    filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4; 
-    filter.action.type = FWP_ACTION_BLOCK;             
-    filter.weight.type = FWP_EMPTY;
-    filter.numFilterConditions = 2; 
-
-    // 1. KOŞUL: Uzak Port -> 443
-    conditions[0].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
-    conditions[0].matchType = FWP_MATCH_EQUAL;
-    conditions[0].conditionValue.type = FWP_UINT16;
-    conditions[0].conditionValue.uint16 = port;
-
-    // 2. KOŞUL: Uygulama -> sonoyuncuclient.exe
-    conditions[1].fieldKey = FWPM_CONDITION_ALE_APP_ID;
-    conditions[1].matchType = FWP_MATCH_EQUAL;
-    conditions[1].conditionValue.type = FWP_BYTE_BLOB_TYPE;
-    conditions[1].conditionValue.byteBlob = appId;
-
-    filter.filterCondition = conditions;
-
-    // Artik gFilterId UINT64* tipinde oldugu icin C2664 hatasi cozuldu
-    DWORD result = FwpmFilterAdd0(gEngineHandle, &filter, NULL, &gFilterId);
-    if (result == ERROR_SUCCESS) {
-        gIsLagging = true;
-        std::cout << "[+] LAG AKTIF! (Sadece SonOyuncu TCP 443 engelleniyor...)\n";
-    } else {
-        std::cout << "[-] Filtre ekleme hatasi: " << result << "\n";
+// Çalışan oyunun PID'sini (Process ID) otomatik bulur
+DWORD GetProcessIdByName(const wchar_t* processName) {
+    DWORD pid = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W processEntry;
+        processEntry.dwSize = sizeof(processEntry);
+        if (Process32FirstW(snapshot, &processEntry)) {
+            do {
+                if (wcscmp(processEntry.szExeFile, processName) == 0) {
+                    pid = processEntry.th32ProcessID;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &processEntry));
+        }
+        CloseHandle(snapshot);
     }
+    return pid;
 }
 
-// WFP Filtresini Kaldır
+// PID üzerinden uygulamanın WFP AppID (Blob) verisini dinamik olarak alır
+FWP_BYTE_BLOB* GetAppIdFromPid(DWORD pid) {
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return NULL;
+
+    wchar_t buffer[MAX_PATH];
+    DWORD size = MAX_PATH;
+    FWP_BYTE_BLOB* appId = NULL;
+
+    if (QueryFullProcessImageNameW(hProcess, 0, buffer, &size)) {
+        FwpmGetAppIdFromFileName0(buffer, &appId);
+    }
+    CloseHandle(hProcess);
+    return appId;
+}
+
+void StartLag(FWP_BYTE_BLOB* appId) {
+    if (gIsLagging || !appId) return;
+
+    FWPM_FILTER0 filter = { 0 };
+    FWPM_FILTER_CONDITION0 condition = { 0 };
+
+    filter.displayData.name = L"SonOyuncuUniversalFilter";
+    filter.action.type = FWP_ACTION_BLOCK; // Paketleri Engelle
+    filter.weight.type = FWP_EMPTY;
+    filter.numFilterConditions = 1;
+
+    // Koşul: Sadece bu uygulamanın paketleri
+    condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
+    condition.matchType = FWP_MATCH_EQUAL;
+    condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
+    condition.conditionValue.byteBlob = appId;
+    filter.filterCondition = &condition;
+
+    // 1. KATMAN: Hem Giden TCP Bağlantılarını Kapat
+    filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+    FwpmFilterAdd0(gEngineHandle, &filter, NULL, &gFilterIdTCP);
+
+    // 2. KATMAN: Hem de Giden UDP (Datagram) Paketlerini Kapat
+    filter.layerKey = FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4;
+    FwpmFilterAdd0(gEngineHandle, &filter, NULL, &gFilterIdUDP);
+
+    gIsLagging = true;
+    std::cout << "[+] LAG AKTIF! (Oyunun tum ag trafigi kesildi)\n";
+}
+
 void StopLag() {
     if (!gIsLagging) return;
 
-    DWORD result = FwpmFilterDeleteById0(gEngineHandle, gFilterId);
-    if (result == ERROR_SUCCESS) {
-        gIsLagging = false;
-        std::cout << "[+] LAG KAPATILDI. Paket akisi normale dondu.\n";
-    }
+    FwpmFilterDeleteById0(gEngineHandle, gFilterIdTCP);
+    FwpmFilterDeleteById0(gEngineHandle, gFilterIdUDP);
+    gIsLagging = false;
+    std::cout << "[+] LAG KAPATILDI. Ag akisi normale dondu.\n";
 }
 
 int main() {
-    UINT16 gamePort = 443; 
-    PCWSTR exePath = L"C:\\Users\\MONSTER\\AppData\\Roaming\\.sonoyuncu\\sonoyuncuclient.exe"; 
-
+    // WFP Engine Açılışı
     DWORD result = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &gEngineHandle);
     if (result != ERROR_SUCCESS) {
-        std::cout << "[-] Basarisiz! Lutfen programi YONETICI OLARAK (Admin) calistirin.\n";
+        std::cout << "[-] Lutfen programi YONETICI OLARAK calistirin.\n";
+        std::cin.get();
         return 1;
     }
 
-    FWP_BYTE_BLOB* appId = NULL;
-    result = FwpmGetAppIdFromFileName0(exePath, &appId);
-    if (result != ERROR_SUCCESS) {
-        std::cout << "[-] Dosya yolu bulunamadi! exePath alanini kontrol edin.\n";
+    std::cout << "=== SonOyuncu Dinamik Blink Lag v2.0 ===\n";
+    std::cout << "[*] Oyun araniyor, lutfen SonOyuncu'yu acik tutun...\n";
+
+    DWORD pid = 0;
+    while (pid == 0) {
+        pid = GetProcessIdByName(L"sonoyuncuclient.exe");
+        if (pid == 0) {
+            Sleep(1000); // Oyun açılana kadar saniyede bir tara
+        }
+    }
+
+    std::cout << "[+] Oyun bulundu! PID: " << pid << "\n";
+    FWP_BYTE_BLOB* appId = GetAppIdFromPid(pid);
+    
+    if (!appId) {
+        std::cout << "[-] Uygulama kimligi alinamadi.\n";
         FwpmEngineClose0(gEngineHandle);
         return 1;
     }
 
-    std::cout << "=======================================\n";
-    std::cout << "   SonOyuncu Nokta Atisi Blink Lag    \n";
-    std::cout << "=======================================\n";
-    std::cout << "[*] Hedef Port: " << gamePort << " (TCP)\n";
-    std::cout << "[*] Kullanim: X tusuna BASILI TUTUNCA lag girer.\n\n";
+    std::cout << "[*] Sistem Hazir! X tusuna basili tutarak lag yapabilirsiniz.\n\n";
 
     while (true) {
         if (GetAsyncKeyState('X') & 0x8000) {
-            StartLag(gamePort, appId);
+            StartLag(appId);
         } else {
             StopLag();
         }
-        Sleep(30); 
+        Sleep(30);
     }
 
     FwpmFreeMemory0((void**)&appId);
