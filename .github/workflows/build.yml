@@ -15,13 +15,13 @@ jobs:
     - name: Depoyu Klonla
       uses: actions/checkout@v4
 
-    - name: MSBuild Kurulumu yap
-      uses: microsoft/setup-msbuild@v2
+    - name: MSVC Developer Command Prompt Kurulumu
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
 
-    - name: C++ Kodunu Derle (Developer Command Prompt ile)
-      shell: cmd # cl.exe'nin ortam değişkenlerini yüklemek için cmd kullanıyoruz
+    - name: C++ Kodunu Derle (Release Mode)
       run: |
-        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
         cl.exe /EHsc /O2 main.cpp /link /OUT:BlinkLag.exe Fwpuclnt.lib User32.lib
 
     - name: Derlenen EXE Dosyasini Yukle
