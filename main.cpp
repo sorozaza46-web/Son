@@ -1,12 +1,23 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
 #include <windows.h>
+#include <winsock2.h> // SOCKET ve WSAAPI tanımları için kesinlikle windows.h'tan sonra veya lean_and_mean ile eklenmelidir.
 #include <iostream>
 #include <vector>
 #include <queue>
 
+// Projenin ws2_32.lib ile bağlanmasını garanti altına alıyoruz
+#pragma comment(lib, "ws2_32.lib")
+
 // Orijinal Winsock send fonksiyonunun imza yapısı
 typedef int(WSAAPI* tSend)(SOCKET s, const char* buf, int len, int flags);
+
+// Global Değişken Tanımlamaları
 tSend oSend = NULL;
-void* trampolineMemory = NULL; // Trambolin için ayrılan bellek alanı
+void* trampolineMemory = NULL; 
+void* pTargetSend = NULL;
 
 // Paketleri geçici olarak tutacağımız kuyruk yapısı
 struct NetworkPacket {
@@ -35,7 +46,7 @@ int WSAAPI hkSend(SOCKET s, const char* buf, int len, int flags) {
         packetQueue.push(pkt);
         LeaveCriticalSection(&queueCriticalSection);
 
-        // Oyuna paketin başarıyla gittiğini söylüyoruz (Bypass noktası)
+        // Oyuna paketin başarıyla gittiğini söylüyoruz
         return len; 
     }
 
@@ -44,8 +55,9 @@ int WSAAPI hkSend(SOCKET s, const char* buf, int len, int flags) {
         EnterCriticalSection(&queueCriticalSection);
         while (!packetQueue.empty()) {
             NetworkPacket pkt = packetQueue.front();
-            // oSend artık trambolini işaret ettiği için güvenle doğrudan çağrılabilir
-            oSend(pkt.socket, pkt.buffer.data(), static_cast<int>(pkt.buffer.size()), pkt.flags);
+            if (oSend != NULL) {
+                oSend(pkt.socket, pkt.buffer.data(), static_cast<int>(pkt.buffer.size()), pkt.flags);
+            }
             packetQueue.pop();
         }
         gIsBlinking = false;
@@ -53,16 +65,20 @@ int WSAAPI hkSend(SOCKET s, const char* buf, int len, int flags) {
     }
 
     // Normal durumlarda trambolin üzerinden orijinal send fonksiyonunu çalıştır
-    return oSend(s, buf, len, flags);
+    if (oSend != NULL) {
+        return oSend(s, buf, len, flags);
+    }
+    
+    return 0;
 }
 
-// Güvenli Trambolin (Trampoline) destekli Satır İçi Kancalama Mekanizması
+// Güvenli Trambolin destekli Satır İçi Kancalama Mekanizması
 void HookSend() {
     HMODULE hWs2 = GetModuleHandleA("ws2_32.dll");
     if (!hWs2) return;
 
-    void* pSend = (void*)GetProcAddress(hWs2, "send");
-    if (!pSend) return;
+    pTargetSend = (void*)GetProcAddress(hWs2, "send");
+    if (!pTargetSend) return;
 
     // 64-bit JUMP (Hook) kodu (Tam olarak 12 Bayt)
     unsigned char jmpCode[] = {
@@ -72,34 +88,33 @@ void HookSend() {
 
     size_t hookSize = sizeof(jmpCode); // 12 Bayt
 
-    // --- TRAMBOLİN OLUŞTURMA (Sonsuz döngüyü engellemek için) ---
-    // Orijinal fonksiyondan çalacağımız 12 baytı ve geri dönüş jump'ını tutacak dinamik bellek ayırıyoruz
+    // --- TRAMBOLİN OLUŞTURMA ---
     trampolineMemory = VirtualAlloc(NULL, hookSize + hookSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!trampolineMemory) return;
 
     // 1. Çalınan ilk 12 baytı trambolin belleğinin başına kopyala
-    memcpy(trampolineMemory, pSend, hookSize);
+    memcpy(trampolineMemory, pTargetSend, hookSize);
 
-    // 2. Trambolinin sonuna, orijinal send fonksiyonunun kaldığı yere (pSend + 12) geri dönecek JUMP kodunu yaz
+    // 2. Trambolinin sonuna geri dönecek JUMP kodunu yaz
     unsigned char trmpJmpCode[12];
     memcpy(trmpJmpCode, jmpCode, hookSize);
-    uint64_t returnAddr = (uint64_t)pSend + hookSize;
+    uint64_t returnAddr = (uint64_t)pTargetSend + hookSize;
     memcpy(&trmpJmpCode[2], &returnAddr, sizeof(returnAddr));
     memcpy((char*)trampolineMemory + hookSize, trmpJmpCode, hookSize);
 
-    // oSend fonksiyonunu bu tramboline yönlendiriyoruz. Artık çağrıldığında orijinal akış bozulmaz.
+    // oSend fonksiyonunu bu tramboline yönlendiriyoruz.
     oSend = (tSend)trampolineMemory;
     // -------------------------------------------------------------
 
     // Orijinal send fonksiyonunun başına kendi hkSend adresimizi yerleştiriyoruz
     DWORD oldProtect;
-    VirtualProtect(pSend, hookSize, PAGE_EXECUTE_READWRITE, &oldProtect);
+    VirtualProtect(pTargetSend, hookSize, PAGE_EXECUTE_READWRITE, &oldProtect);
 
     uint64_t hookAddr = (uint64_t)hkSend;
     memcpy(&jmpCode[2], &hookAddr, sizeof(hookAddr));
-    memcpy(pSend, jmpCode, hookSize);
+    memcpy(pTargetSend, jmpCode, hookSize);
 
-    VirtualProtect(pSend, hookSize, oldProtect, &oldProtect);
+    VirtualProtect(pTargetSend, hookSize, oldProtect, &oldProtect);
 }
 
 DWORD WINAPI MainThread(LPVOID lpParam) {
@@ -115,7 +130,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         CreateThread(NULL, 0, MainThread, NULL, 0, NULL);
         break;
     case DLL_PROCESS_DETACH:
-        // Ayrılan trambolin belleğini serbest bırak
         if (trampolineMemory) {
             VirtualFree(trampolineMemory, 0, MEM_RELEASE);
         }
