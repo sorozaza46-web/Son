@@ -1,9 +1,7 @@
-name: Build Blink Lag Exe
+name: Build Blink Lag DLL
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
     branches: [ "main" ]
   workflow_dispatch: 
 
@@ -20,13 +18,13 @@ jobs:
       with:
         arch: x64
 
-    - name: C++ Kodunu Derle (Release Mode)
+    - name: C++ Kodunu DLL Olarak Derle
       run: |
-        cl.exe /EHsc /O2 main.cpp /link /OUT:BlinkLag.exe Fwpuclnt.lib User32.lib
+        cl.exe /EHsc /O2 /LD main.cpp /link /OUT:BlinkHook.dll User32.lib
 
-    - name: Derlenen EXE Dosyasini Yukle
+    - name: Derlenen DLL Dosyasini Yukle
       uses: actions/upload-artifact@v4
       with:
-        name: BlinkLag-Windows-Exe
-        path: BlinkLag.exe
+        name: BlinkLag-Windows-DLL
+        path: BlinkHook.dll
         
