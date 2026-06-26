@@ -5,7 +5,7 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
-  workflow_dispatch: # Manuel olarak da tetikleyebilmen için
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -18,8 +18,10 @@ jobs:
     - name: MSBuild Kurulumu yap
       uses: microsoft/setup-msbuild@v2
 
-    - name: C++ Kodunu Derle (Release Mode)
+    - name: C++ Kodunu Derle (Developer Command Prompt ile)
+      shell: cmd # cl.exe'nin ortam değişkenlerini yüklemek için cmd kullanıyoruz
       run: |
+        call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
         cl.exe /EHsc /O2 main.cpp /link /OUT:BlinkLag.exe Fwpuclnt.lib User32.lib
 
     - name: Derlenen EXE Dosyasini Yukle
