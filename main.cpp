@@ -10,7 +10,7 @@ UINT64 gFilterIdTCP = 0;
 UINT64 gFilterIdUDP = 0;
 bool gIsLagging = false;
 
-// Çalışan oyunun PID'sini (Process ID) otomatik bulur
+// Çalışan oyunun PID'sini otomatik bulur
 DWORD GetProcessIdByName(const wchar_t* processName) {
     DWORD pid = 0;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -30,7 +30,7 @@ DWORD GetProcessIdByName(const wchar_t* processName) {
     return pid;
 }
 
-// PID üzerinden uygulamanın WFP AppID (Blob) verisini dinamik olarak alır
+// PID üzerinden WFP AppID verisini alır
 FWP_BYTE_BLOB* GetAppIdFromPid(DWORD pid) {
     HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!hProcess) return NULL;
@@ -53,27 +53,23 @@ void StartLag(FWP_BYTE_BLOB* appId) {
     FWPM_FILTER_CONDITION0 condition = { 0 };
 
     filter.displayData.name = L"SonOyuncuUniversalFilter";
-    filter.action.type = FWP_ACTION_BLOCK; // Paketleri Engelle
+    filter.action.type = FWP_ACTION_BLOCK; 
     filter.weight.type = FWP_EMPTY;
     filter.numFilterConditions = 1;
 
-    // Koşul: Sadece bu uygulamanın paketleri
     condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
     condition.matchType = FWP_MATCH_EQUAL;
     condition.conditionValue.type = FWP_BYTE_BLOB_TYPE;
     condition.conditionValue.byteBlob = appId;
     filter.filterCondition = &condition;
 
-    // 1. KATMAN: Hem Giden TCP Bağlantılarını Kapat
     filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
     FwpmFilterAdd0(gEngineHandle, &filter, NULL, &gFilterIdTCP);
 
-    // 2. KATMAN: Hem de Giden UDP (Datagram) Paketlerini Kapat
     filter.layerKey = FWPM_LAYER_ALE_RESOURCE_ASSIGNMENT_V4;
     FwpmFilterAdd0(gEngineHandle, &filter, NULL, &gFilterIdUDP);
 
     gIsLagging = true;
-    std::cout << "[+] LAG AKTIF! (Oyunun tum ag trafigi kesildi)\n";
 }
 
 void StopLag() {
@@ -82,11 +78,9 @@ void StopLag() {
     FwpmFilterDeleteById0(gEngineHandle, gFilterIdTCP);
     FwpmFilterDeleteById0(gEngineHandle, gFilterIdUDP);
     gIsLagging = false;
-    std::cout << "[+] LAG KAPATILDI. Ag akisi normale dondu.\n";
 }
 
 int main() {
-    // WFP Engine Açılışı
     DWORD result = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &gEngineHandle);
     if (result != ERROR_SUCCESS) {
         std::cout << "[-] Lutfen programi YONETICI OLARAK calistirin.\n";
@@ -94,14 +88,14 @@ int main() {
         return 1;
     }
 
-    std::cout << "=== SonOyuncu Dinamik Blink Lag v2.0 ===\n";
+    std::cout << "=== SonOyuncu Kesikli Blink Lag v2.5 ===\n";
     std::cout << "[*] Oyun araniyor, lutfen SonOyuncu'yu acik tutun...\n";
 
     DWORD pid = 0;
     while (pid == 0) {
         pid = GetProcessIdByName(L"sonoyuncuclient.exe");
         if (pid == 0) {
-            Sleep(1000); // Oyun açılana kadar saniyede bir tara
+            Sleep(1000);
         }
     }
 
@@ -109,20 +103,31 @@ int main() {
     FWP_BYTE_BLOB* appId = GetAppIdFromPid(pid);
     
     if (!appId) {
-        std::cout << "[-] Uygulama kimligi alinamadi.\n";
+        std::cout << "[-] Delta kimligi alinamadi.\n";
         FwpmEngineClose0(gEngineHandle);
         return 1;
     }
 
-    std::cout << "[*] Sistem Hazir! X tusuna basili tutarak lag yapabilirsiniz.\n\n";
+    std::cout << "[*] Sistem Hazir! X tusuna basili tuttugunuzda kesikli lag uygulanir.\n\n";
 
     while (true) {
+        // X tuşuna basılı tutuluyorsa
         if (GetAsyncKeyState('X') & 0x8000) {
+            std::cout << "[>] Paket akisi kesiliyor...\n";
             StartLag(appId);
-        } else {
+            Sleep(120); // 120 milisaniye boyunca paketleri tamamen engelle (Atılma sınırının altında)
+
+            // Bağlantının tamamen kopmaması için engeli anlık olarak kaldırıp can suyu veriyoruz
             StopLag();
+            Sleep(40);  // 40 milisaniye boyunca biriken paketlerin geçmesine izin ver
+        } else {
+            // Tuş bırakıldığında filtrenin temizlendiğinden emin ol
+            if (gIsLagging) {
+                StopLag();
+                std::cout << "[+] Normal akisa donuldu.\n";
+            }
+            Sleep(30);
         }
-        Sleep(30);
     }
 
     FwpmFreeMemory0((void**)&appId);
