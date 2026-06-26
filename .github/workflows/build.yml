@@ -1,0 +1,30 @@
+name: Build Blink Lag Exe
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Manuel olarak da tetikleyebilmen için
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Depoyu Klonla
+      uses: actions/checkout@v4
+
+    - name: MSBuild Kurulumu yap
+      uses: microsoft/setup-msbuild@v2
+
+    - name: C++ Kodunu Derle (Release Mode)
+      run: |
+        cl.exe /EHsc /O2 main.cpp /link /OUT:BlinkLag.exe Fwpuclnt.lib User32.lib
+
+    - name: Derlenen EXE Dosyasini Yukle
+      uses: actions/upload-artifact@v4
+      with:
+        name: BlinkLag-Windows-Exe
+        path: BlinkLag.exe
+        
